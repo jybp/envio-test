@@ -23,7 +23,9 @@ SNAPSHOT_STRATEGY=exact_midnight pnpm dev
 
 ## Problem: block intervals drift from wall-clock time
 
-Block handlers fire on fixed block intervals (`_every: N`), not timestamps. On mainnet (~12s/block), `_every: 7200` drifts from midnight UTC due to missed slots and variable block times. Observed: **~7 min/day drift**, so ~1.5h after 2 weeks.
+Block handlers fire on fixed block intervals (`_every: N`), not timestamps. On mainnet (~12s/block), `_every: 7200` drifts from midnight UTC due to missed slots and/or variable block times. 
+
+Observed: **~7 min/day drift**, so ~1.5h after 2 weeks.
 
 Additionally, `block.timestamp` is [not available](https://docs.envio.dev/docs/v2/HyperIndex/block-handlers#current-limitations) in the block handler callback — any timestamp-aware logic requires an RPC call via the Effect API.
 
@@ -47,3 +49,9 @@ If `block.timestamp` were exposed in the handler callback, `exact_midnight` — 
 2. **Timestamp-aligned intervals** — any way to fire "at first block after midnight UTC" rather than every N blocks?
 
 TBD proper caching strategy for historical sync.
+
+## Local benchmarks (free tier HyperSync, 14 days mainnet)
+
+- **`daily`**: ~8s/day, drifted +80min over 14 days
+- **`hourly_filter`**: ~7s/day, stayed within ±30min of midnight
+- **`exact_midnight`**: ~13min/day, ±11s accuracy — works but seem impractical
