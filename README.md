@@ -29,6 +29,8 @@ Observed: **~7 min/day drift**, so ~1.5h after 2 weeks.
 
 Additionally, `block.timestamp` is [not available](https://docs.envio.dev/docs/v2/HyperIndex/block-handlers#current-limitations) in the block handler callback — any timestamp-aware logic requires an RPC call via the Effect API.
 
+> Only block number is provided in the block object. We'll definitely add more fields in the future.
+
 https://www.alchemy.com/docs/chains/ethereum/ethereum-api-endpoints/eth-get-block-by-number
 
 ## Three strategies compared
@@ -55,3 +57,8 @@ TBD proper caching strategy for historical sync.
 - **`daily`**: ~8s/day, drifted +80min over 14 days
 - **`hourly_filter`**: ~7s/day, stayed within ±30min of midnight
 - **`exact_midnight`**: ~13min/day, ±11s accuracy — works but seem impractical
+
+## Considered: `Date.now()` boundary detection
+
+Another possibility was firing on every block and using `Date.now()` to detect 24h wall-clock boundaries — no RPC needed, only fetch data when the boundary crosses. 
+However, `Date.now()` is real time, not block time for historical sync. Only viable for realtime-only use cases.
