@@ -62,3 +62,9 @@ TBD proper caching strategy for historical sync.
 
 Another possibility was firing on every block and using `Date.now()` to detect 24h wall-clock boundaries — no RPC needed, only fetch data when the boundary crosses. 
 However, `Date.now()` is real time, not block time for historical sync. Only viable for realtime-only use cases.
+
+## Could we precompute midnight blocks?
+
+APIs like [Etherscan's `getblocknobytime`](https://docs.etherscan.io/api-reference/endpoint/getblocknobytime) return the block number closest to a given timestamp. We could precompute all midnight UTC blocks upfront and only snapshot those exact blocks — no drift, no per-block RPC calls.
+
+Unsure: A [preset handler](https://docs.envio.dev/docs/HyperIndex/block-handlers#preset-handler) could call `getblocknobytime` for every midnight timestamp in the indexing range, store those block numbers as entities, then the hourly block handler checks if the current block is one of them. No drift, no per-block RPC — just one API call per day at init time?
