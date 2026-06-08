@@ -1,0 +1,7 @@
+.omc
+node_modules/
+generated/
+.envio/
+*.tsbuildinfo
+envio-env.d.ts
+.env

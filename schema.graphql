@@ -1,0 +1,6 @@
+type TotalSupplySnapshot {
+  id: ID!
+  totalSupply: BigInt!
+  blockNumber: Int!
+  blockTimestamp: Int!
+}

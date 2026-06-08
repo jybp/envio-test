@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/enviodev/hyperindex/8b85a78ded2ade2988b98c2c0814e2a42685e24e/codegenerator/cli/npm/envio/evm.schema.json
+name: USDC TotalSupply Tracker
+description: Hourly USDC totalSupply snapshots on Ethereum mainnet
+schema: schema.graphql
+contracts:
+  # We only need block handlers, not events. Using USDC Approval (much fewer
+  # events than Transfer) to minimize HyperSync scanning overhead.
+  - name: USDC
+    abi_file_path: abis/ERC20.json
+    handler: src/EventHandlers.ts
+    events:
+      - event: Approval
+chains:
+  - id: 1
+    start_block: 25168597  # 2026-05-25T00:00:11Z — first block after midnight UTC
+    rpc:
+      - url: ${ENVIO_1_RPC_URL}
+    contracts:
+      - name: USDC
+        address:
+          - 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+raw_events: true
