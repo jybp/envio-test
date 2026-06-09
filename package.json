@@ -10,6 +10,7 @@
     "stop": "envio stop"
   },
   "dependencies": {
+    "@envio-dev/hypersync-client": "^1.4.0",
     "envio": "3.0.2",
     "viem": "2.37.9"
   },

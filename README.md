@@ -19,6 +19,7 @@ pnpm stop
 SNAPSHOT_STRATEGY=daily pnpm dev
 SNAPSHOT_STRATEGY=hourly_filter pnpm dev
 SNAPSHOT_STRATEGY=exact_midnight pnpm dev
+SNAPSHOT_STRATEGY=hypersync_midnight pnpm dev
 ```
 
 ## Problem: block intervals drift from wall-clock time
@@ -33,13 +34,14 @@ Additionally, `block.timestamp` is [not available](https://docs.envio.dev/docs/v
 
 https://www.alchemy.com/docs/chains/ethereum/ethereum-api-endpoints/eth-get-block-by-number
 
-## Three strategies compared
+## Four strategies compared
 
-| Strategy | `_every` | Accuracy | RPC calls/day
+| Strategy | `_every` | Accuracy | Timestamp source |
 |---|---|---|---|
-| `daily` | 7200 | Drifts ~7min/day (+80min after 2 weeks) | 1 (totalSupply) |
-| `hourly_filter` | 300 | ±30min of midnight | 24 (timestamp) + 1 |
-| `exact_midnight` | 1 | ±12s | ~7200 (timestamp) + 1 |
+| `daily` | 7200 | Drifts ~7min/day (+80min after 2 weeks) | RPC |
+| `hourly_filter` | 300 | ±30min of midnight | RPC |
+| `exact_midnight` | 1 | ±12s | RPC (slow) |
+| `hypersync_midnight` | 1 | ±12s | HyperSync (fast) |
 
 ## What would solve this
 
@@ -56,7 +58,8 @@ TBD proper caching strategy for historical sync.
 
 - **`daily`**: ~8s/day, drifted +80min over 14 days
 - **`hourly_filter`**: ~7s/day, stayed within ±30min of midnight
-- **`exact_midnight`**: ~13min/day, ±11s accuracy — works but seem impractical
+- **`exact_midnight`**: ~13min/day, ±11s accuracy — works but impractical (RPC per block)
+- **`hypersync_midnight`**: ~15s/day, ±11s accuracy — recommended approach, uses HyperSync for batch timestamp lookup
 
 ## Considered: `Date.now()` boundary detection
 

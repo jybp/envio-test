@@ -1,14 +1,15 @@
 import { createEffect, indexer, S } from 'envio';
 import { createPublicClient, http, type PublicClient } from 'viem';
+import { HypersyncClient } from '@envio-dev/hypersync-client';
 
 // ---------------------------------------------------------------------------
 // Strategy selection via SNAPSHOT_STRATEGY env var:
 //
-//   daily          — fire every 7200 blocks (~24h). Simple, drifts over time.
-//   hourly_filter  — fire every 300 blocks (~1h), only store if timestamp is
-//                    within 30 min of midnight UTC. One entry/day, low drift.
-//   exact_midnight — fire every block, RPC-fetch timestamp, store only when
-//                    crossing a midnight UTC boundary. Exact but slow to sync.
+//   daily              — fire every 7200 blocks (~24h). Simple, drifts.
+//   hourly_filter      — fire every 300 blocks (~1h), store near midnight only.
+//   exact_midnight     — fire every block via RPC timestamp. Exact but slow.
+//   hypersync_midnight — fire every block, batch-fetch timestamps via HyperSync.
+//                        Exact and fast. Recommended by Envio team.
 //
 // Default: hourly_filter
 // ---------------------------------------------------------------------------
@@ -16,7 +17,8 @@ import { createPublicClient, http, type PublicClient } from 'viem';
 const STRATEGY = (process.env.SNAPSHOT_STRATEGY || 'hourly_filter') as
     | 'daily'
     | 'hourly_filter'
-    | 'exact_midnight';
+    | 'exact_midnight'
+    | 'hypersync_midnight';
 
 console.log(`[Snapshot] Strategy: ${STRATEGY}`);
 
@@ -82,6 +84,7 @@ const getTotalSupply = createEffect(
     }
 );
 
+// RPC-based timestamp lookup (used by daily, hourly_filter, exact_midnight)
 const getBlockTimestamp = createEffect(
     {
         name: 'getBlockTimestamp',
@@ -102,6 +105,100 @@ const getBlockTimestamp = createEffect(
         }
     }
 );
+
+// HyperSync-based batched timestamp lookup (used by hypersync_midnight).
+// Uses queueMicrotask to accumulate multiple block number requests from the
+// same tick into a single HyperSync range query. Much faster than individual
+// RPC calls during historical sync.
+const initHypersyncTimestamp = () => {
+    const hsClient = new HypersyncClient({
+        url: 'https://1.hypersync.xyz',
+        apiToken: process.env.ENVIO_API_TOKEN!
+    });
+
+    let pendingBatch: {
+        blockNumbers: Set<number>;
+        resolvers: Map<number, { resolve: (ts: number) => void; reject: (e: Error) => void }[]>;
+        scheduled: boolean;
+    } | null = null;
+
+    return createEffect(
+        {
+            name: 'getBlockTimestampHypersync',
+            input: S.number,
+            output: S.number,
+            rateLimit: false
+        },
+        async ({ input: blockNumber }) => {
+            if (!pendingBatch) {
+                pendingBatch = { blockNumbers: new Set(), resolvers: new Map(), scheduled: false };
+            }
+
+            const batch = pendingBatch;
+            batch.blockNumbers.add(blockNumber);
+
+            const promise = new Promise<number>((resolve, reject) => {
+                const existing = batch.resolvers.get(blockNumber) || [];
+                existing.push({ resolve, reject });
+                batch.resolvers.set(blockNumber, existing);
+            });
+
+            if (!batch.scheduled) {
+                batch.scheduled = true;
+                queueMicrotask(async () => {
+                    const currentBatch = batch;
+                    pendingBatch = null;
+
+                    const blockNumbers = Array.from(currentBatch.blockNumbers);
+                    const minBlock = Math.min(...blockNumbers);
+                    const maxBlock = Math.max(...blockNumbers);
+
+                    try {
+                        const timestampMap = new Map<number, number>();
+                        let nextBlock = minBlock;
+                        const toBlock = maxBlock + 1;
+
+                        while (nextBlock < toBlock) {
+                            const data = await hsClient.get({
+                                fromBlock: nextBlock,
+                                toBlock,
+                                includeAllBlocks: true,
+                                fieldSelection: { block: ['Number', 'Timestamp'] }
+                            });
+
+                            for (const block of data.data.blocks) {
+                                if (block.number !== undefined && block.timestamp !== undefined) {
+                                    timestampMap.set(block.number, block.timestamp);
+                                }
+                            }
+
+                            nextBlock = data.nextBlock;
+                        }
+
+                        for (const [blockNum, resolverList] of currentBatch.resolvers) {
+                            const timestamp = timestampMap.get(blockNum);
+                            for (const { resolve, reject } of resolverList) {
+                                if (timestamp !== undefined) {
+                                    resolve(timestamp);
+                                } else {
+                                    reject(new Error(`Timestamp not found for block ${blockNum}`));
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        for (const resolverList of currentBatch.resolvers.values()) {
+                            for (const { reject } of resolverList) {
+                                reject(error instanceof Error ? error : new Error(String(error)));
+                            }
+                        }
+                    }
+                });
+            }
+
+            return promise;
+        }
+    );
+};
 
 // ---------------------------------------------------------------------------
 // Shared
@@ -183,16 +280,11 @@ if (STRATEGY === 'hourly_filter') {
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 3: EXACT_MIDNIGHT
-// NOTE: _every: 1 registers but never fires — suspected Envio bug.
-// The handler callback is never invoked despite where() being called.
+// Strategy 3: EXACT_MIDNIGHT (RPC)
+// NOTE: _every: 1 with RPC timestamp is very slow during historical sync.
 // ---------------------------------------------------------------------------
 
 if (STRATEGY === 'exact_midnight') {
-    // WARNING: lastSeenDay may be stale after indexer restart (Envio replays
-    // blocks and the in-memory variable gets set from replayed data). The
-    // entity ID (usdc_day_N) handles dedup via overwrite, but lastSeenDay
-    // prevents unnecessary RPC calls on every block within the same day.
     let lastSeenDay = -1;
 
     indexer.onBlock(
@@ -207,6 +299,35 @@ if (STRATEGY === 'exact_midnight') {
             const blockTimestamp = await context.effect(getBlockTimestamp, {
                 blockNumber: BigInt(block.number)
             });
+            const day = dayOf(blockTimestamp);
+            if (day === lastSeenDay) return;
+            lastSeenDay = day;
+            await storeSnapshot(block, context, blockTimestamp);
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Strategy 4: HYPERSYNC_MIDNIGHT
+// Fires every block but uses HyperSync to
+// batch-fetch timestamps (no RPC calls). Only stores on day boundary.
+// See: https://github.com/enviodev/hyperindex/issues/748#issuecomment-3722929189
+// ---------------------------------------------------------------------------
+
+if (STRATEGY === 'hypersync_midnight') {
+    const getTimestampHS = initHypersyncTimestamp();
+    let lastSeenDay = -1;
+
+    indexer.onBlock(
+        {
+            name: 'HypersyncMidnightSnapshot',
+            where: ({ chain }) => {
+                if (chain.id !== 1) return false;
+                return { block: { number: { _every: 1 } } };
+            }
+        },
+        async ({ block, context }) => {
+            const blockTimestamp = await context.effect(getTimestampHS, block.number);
             const day = dayOf(blockTimestamp);
             if (day === lastSeenDay) return;
             lastSeenDay = day;
