@@ -18,7 +18,8 @@ const STRATEGY = (process.env.SNAPSHOT_STRATEGY || 'hourly_filter') as
     | 'daily'
     | 'hourly_filter'
     | 'exact_midnight'
-    | 'hypersync_midnight';
+    | 'hypersync_midnight'
+    | 'hypersync_midnight_v2';
 
 console.log(`[Snapshot] Strategy: ${STRATEGY}`);
 
@@ -134,10 +135,10 @@ async function storeSnapshot(block: { number: number }, context: any, blockTimes
 
     // Using getOrCreate instead of set should allow to keep the first snapshot of the day since 
     // we invoke storeSnapshot in hypersync_midnight mode for all blocks near after midnight.
-    // This assumes that storeSnapshots will be always executed in order of block numbers.
+    // This assumes that storeSnapshots will be always be executed in order of block numbers.
     // The id acts as the deduplication key.
     await context.TotalSupplySnapshot.getOrCreate({
-        id: `usdc_day_${dayOf(blockTimestamp)}`,
+        id: `usdc_${fmtDay(dayOf(blockTimestamp)).replaceAll('-', '_')}`,
         totalSupply,
         blockNumber: block.number,
         blockTimestamp
@@ -262,9 +263,6 @@ const initHypersyncTimestamp =  () => {
             name: 'getBlockTimestampHypersync',
             input: S.number,
             output: S.number,
-            // Leave bandwidth for the main HyperSync event sync (shared 60 req/min free tier quota).
-            // Set to false on Envio Cloud or with a paid HyperSync plan.
-            // rateLimit: { calls: 10, per: 'minute' }
             rateLimit: false
         },
         async ({ input: blockNumber }) => {
@@ -346,14 +344,17 @@ const initHypersyncTimestamp =  () => {
 };
 
 
+// ---------------------------------------------------------------------------
+// Strategy 4: HYPERSYNC_MIDNIGHT
+// Uses lastSeenDay variable to detect day boundary changes.
+// Relies on FIFO microtask ordering guarantee (ECMAScript spec) to ensure
+// getOrCreate runs in block order. No threshold needed — stores exactly on
+// day boundary change.
+// ---------------------------------------------------------------------------
+
 if (STRATEGY === 'hypersync_midnight') {
     const getTimestampHS = initHypersyncTimestamp();
-
-    // Max seconds into a UTC day for a block to count as "midnight".
-    // With _every: 1 on mainnet (~12s blocks), the first block of a new day
-    // is at most ~12s past 00:00:00. Use 120s for safety margin.
-    // TODO mainnet specific.
-    const MIDNIGHT_THRESHOLD = 120; 
+    let lastSeenDay = -1;
 
     indexer.onBlock(
         {
@@ -365,21 +366,64 @@ if (STRATEGY === 'hypersync_midnight') {
         },
         async ({ block, context }) => {
             const blockTimestamp = await context.effect(getTimestampHS, block.number);
-            const secondsInDay = blockTimestamp % SECONDS_PER_DAY;
-
-            // Only store blocks in the first 2 minutes of a UTC day.
-            // This is required because of concurrency safety, onBlocks will keep being invoked 
-            // while previous block invocations would still be blocked on the getTimestampHS effect.
-            // Therefore no in-memory state living outside indexer.onBlock's scope can be used.
-            // All blocks that are within the same getTimestampHS batch should get unblocked at the
-            // same time. In practice, the storeSnapshot calls below should be executed in order 
-            // of block numbers nonetheless.
-            if (secondsInDay > MIDNIGHT_THRESHOLD) return;
-
             const day = dayOf(blockTimestamp);
-            context.log.info(`[hypersync_midnight] MIDNIGHT block ${block.number} ${fmtTs(blockTimestamp)} day=${fmtDay(day)} (${secondsInDay}s into day)`);
+
+            if (lastSeenDay === -1) {
+                context.log.info(`[hypersync_midnight] First block ${block.number} ${fmtTs(blockTimestamp)} day=${fmtDay(day)}`);
+                lastSeenDay = day;
+                return;
+            }
+
+            if (day <= lastSeenDay) return;
+
+            context.log.info(`[hypersync_midnight] DAY CHANGE block ${block.number} ${fmtTs(blockTimestamp)} day=${fmtDay(day)}`);
+            lastSeenDay = day;
             await storeSnapshot(block, context, blockTimestamp);
         }
     );
 }
 
+// ---------------------------------------------------------------------------
+// Strategy 5: HYPERSYNC_MIDNIGHT_V2
+// Uses a MIDNIGHT_THRESHOLD window instead of in-memory state.
+// Concurrency-safe by design — no shared mutable variable across handlers.
+// getOrCreate in storeSnapshot ensures first block of the day wins.
+// ---------------------------------------------------------------------------
+
+if (STRATEGY === 'hypersync_midnight_v2') {
+    const getTimestampHS = initHypersyncTimestamp();
+
+    // Max seconds into a UTC day for a block to count as "midnight".
+    // With _every: 1 on mainnet (~12s blocks), the first block of a new day
+    // is at most ~12s past 00:00:00. Use 120s for safety margin.
+    // TODO mainnet specific.
+    const MIDNIGHT_THRESHOLD = 120;
+
+    indexer.onBlock(
+        {
+            name: 'HypersyncMidnightV2Snapshot',
+            where: ({ chain }) => {
+                if (chain.id !== 1) return false;
+                return { block: { number: { _every: 1 } } };
+            }
+        },
+        async ({ block, context }) => {
+            const blockTimestamp = await context.effect(getTimestampHS, block.number);
+            const secondsInDay = blockTimestamp % SECONDS_PER_DAY;
+
+            // Only store blocks in the first 2 minutes of a UTC day.
+            // This is required because of concurrency safety, onBlocks will keep being invoked
+            // while previous block invocations would still be blocked on the getTimestampHS effect.
+            // Therefore no in-memory state living outside indexer.onBlock's scope can be used.
+            // All blocks that are within the same getTimestampHS batch should get unblocked at the
+            // same time. In practice, the storeSnapshot calls below should be executed in order
+            // of block numbers nonetheless.
+            // The downside is that all blocks within the threshold will have rpc calls.
+            if (secondsInDay > MIDNIGHT_THRESHOLD) return;
+
+            const day = dayOf(blockTimestamp);
+            context.log.info(`[hypersync_midnight_v2] MIDNIGHT block ${block.number} ${fmtTs(blockTimestamp)} day=${fmtDay(day)} (${secondsInDay}s into day)`);
+            await storeSnapshot(block, context, blockTimestamp);
+        }
+    );
+}
