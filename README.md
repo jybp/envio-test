@@ -59,7 +59,7 @@ TBD proper caching strategy for historical sync.
 - **`daily`**: ~8s/day, drifted +80min over 14 days
 - **`hourly_filter`**: ~7s/day, stayed within ±30min of midnight
 - **`exact_midnight`**: ~13min/day, ±11s accuracy — works but impractical (RPC per block)
-- **`hypersync_midnight`**: ~15s/day, ±11s accuracy — recommended approach, uses HyperSync for batch timestamp lookup
+- **`hypersync_midnight`**: ~15s/day, ±11s accuracy — uses HyperSync for batch timestamp lookup. Requires paid HyperSync plan or Envio Cloud (free tier rate limit makes `_every: 1` unusable on clean start)
 
 ## Considered: `Date.now()` boundary detection
 
