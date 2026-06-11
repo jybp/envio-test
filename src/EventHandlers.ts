@@ -129,23 +129,27 @@ function fmtDay(day: number): string {
 }
 
 async function storeSnapshot(block: { number: number }, context: any, blockTimestamp: number) {
+    const entityId = `usdc_${fmtDay(dayOf(blockTimestamp)).replaceAll('-', '_')}`;
+
+    // Check if this day's snapshot already exists — skip the expensive RPC
+    // totalSupply call if so. Due to FIFO microtask ordering, the first block
+    // of the day should set() before subsequent blocks reach this get().
+    const existing = await context.TotalSupplySnapshot.get(entityId);
+    if (existing) return;
+
     const totalSupply = await context.effect(getTotalSupply, {
         blockNumber: BigInt(block.number)
     });
 
-    // Using getOrCreate instead of set should allow to keep the first snapshot of the day since 
-    // we invoke storeSnapshot in hypersync_midnight mode for all blocks near after midnight.
-    // This assumes that storeSnapshots will be always be executed in order of block numbers.
-    // The id acts as the deduplication key.
-    await context.TotalSupplySnapshot.getOrCreate({
-        id: `usdc_${fmtDay(dayOf(blockTimestamp)).replaceAll('-', '_')}`,
+    context.TotalSupplySnapshot.set({
+        id: entityId,
         totalSupply,
         blockNumber: block.number,
         blockTimestamp
     });
 
     context.log.info(
-        `[${STRATEGY}] block ${block.number} (${new Date(blockTimestamp * 1000).toISOString()}): totalSupply = ${totalSupply}`
+        `[${STRATEGY}] block ${block.number} (${fmtTs(blockTimestamp)}): totalSupply = ${totalSupply}`
     );
 }
 
