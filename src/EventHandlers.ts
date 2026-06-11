@@ -415,19 +415,36 @@ if (STRATEGY === 'hypersync_midnight_v2') {
             const blockTimestamp = await context.effect(getTimestampHS, block.number);
             const secondsInDay = blockTimestamp % SECONDS_PER_DAY;
 
-            // Only store blocks in the first 2 minutes of a UTC day.
-            // This is required because of concurrency safety, onBlocks will keep being invoked
-            // while previous block invocations would still be blocked on the getTimestampHS effect.
-            // Therefore no in-memory state living outside indexer.onBlock's scope can be used.
-            // All blocks that are within the same getTimestampHS batch should get unblocked at the
-            // same time. In practice, the storeSnapshot calls below should be executed in order
-            // of block numbers nonetheless.
-            // The downside is that all blocks within the threshold will have rpc calls.
+            // Only consider blocks in the first 2 minutes of a UTC day.
+            // This is required because of concurrency safety: onBlock handlers
+            // keep being invoked while previous invocations are still awaiting
+            // the getTimestampHS effect. No in-memory state outside the handler
+            // scope can be safely used.
             if (secondsInDay > MIDNIGHT_THRESHOLD) return;
 
             const day = dayOf(blockTimestamp);
-            context.log.info(`[hypersync_midnight_v2] MIDNIGHT block ${block.number} ${fmtTs(blockTimestamp)} day=${fmtDay(day)} (${secondsInDay}s into day)`);
-            await storeSnapshot(block, context, blockTimestamp);
+            const entityId = `usdc_${fmtDay(day).replaceAll('-', '_')}`;
+
+            // Skip if this day's snapshot already exists — avoids the expensive
+            // RPC totalSupply call. Due to FIFO microtask ordering, the first
+            // block of the day should set() before subsequent blocks reach here.
+            const existing = await context.TotalSupplySnapshot.get(entityId);
+            if (existing) return;
+
+            const totalSupply = await context.effect(getTotalSupply, {
+                blockNumber: BigInt(block.number)
+            });
+
+            context.TotalSupplySnapshot.set({
+                id: entityId,
+                totalSupply,
+                blockNumber: block.number,
+                blockTimestamp
+            });
+
+            context.log.info(
+                `[hypersync_midnight_v2] block ${block.number} (${fmtTs(blockTimestamp)}): totalSupply = ${totalSupply}`
+            );
         }
     );
 }
